@@ -1,8 +1,10 @@
 import firebase_admin as fa
 from firebase_admin import credentials, firestore, auth
-import requests
 from dotenv import load_dotenv
 import os
+from flask import Flask, request, jsonify, make_response
+
+app = Flask(__name__)
 
 cred = credentials.Certificate("ServiceAccountKey.json")
 fa.initialize_app(cred)
@@ -11,32 +13,35 @@ db = firestore.client()
 
 load_dotenv(dotenv_path=".idea/.env")
 
-api_key = os.getenv('API_KEY')
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    name = data.get("name")
+    email = data.get("email")
+    password = data.get("password")
 
-def register_user(name, email, password):
+    if not email.endswith("@gmail.com") or len(password) < 8:
+        return jsonify({"error": "Invalid email or password"}), 400
+
     try:
-        # 1. Create user in Firebase Auth
-        user = auth.create_user(
-            email=email,
-            password=password,
-            display_name=name
-        )
-        print(f'Successfully created user: {user.uid}')
-
-        # 2. Create user document in Firestore
-        db.collection('users').document(user.uid).set({
-            'name': name,
-            'email': email,
-            'uid': user.uid,
-            'createdAt': firestore.SERVER_TIMESTAMP
-        })
-        print(f'Successfully added user to Firestore: {user.uid}')
-        return user
+        user = auth.create_user(email=email, password=password, display_name=name)
+        return jsonify({
+            "message": "User registered successfully",
+            "uid": user.uid,
+            "email": user.email
+        }), 201
     except Exception as e:
-        print(f'Error creating user: {e}')
-        return None
+        return jsonify({"error": str(e)}), 500
 
-def login_user(email, password):
+@app.route("/login", methods=["POST"])
+def login():
+    import requests
+
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+
+    api_key = os.getenv('API_KEY')
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
 
     payload = {
@@ -48,64 +53,41 @@ def login_user(email, password):
     response = requests.post(url, json=payload)
 
     if response.status_code == 200:
-        data = response.json()
-        id_token = data['idToken']
-        print("Successfully logged in!")
-        print(f"ID Token: {id_token}")
+        result = response.json()
+        id_token = result.pop("idToken", None)
 
-        #fetch user Firestore document
-        decoded_token = auth.verify_id_token(id_token)
-        uid = decoded_token['uid']
+        response_data = {
+            "message": "Login successful",
+            "user": {
+                "email": result.get("email"),
+                "name": result.get("displayName")
+            }
+        }
 
-        user_doc = db.collection('users').document(uid).get()
-        if user_doc.exists:
-            print("User Firestore Data:", user_doc.to_dict())
-            return {
-                "idToken": id_token,
-                "userData": user_doc.to_dict()
-            }
-        else:
-            print("No user document found!")
-            return {
-                "idToken": id_token,
-                "userData": None
-            }
+        flask_response = make_response(jsonify(response_data), 200)
+        flask_response.set_cookie(
+            "token", id_token,
+            httponly=True,
+            secure=True,
+            samesite='Strict',
+            max_age=3600
+        )
+
+        return flask_response
     else:
-        print("Failed to log in:", response.json())
-        return None
+        return jsonify({"error": response.json()}), 401
+
+@app.route("/user/<uid>", methods=["GET"])
+def get_user(uid):
+    try:
+        user = auth.get_user(uid)
+        return jsonify({
+            "uid": user.uid,
+            "email": user.email,
+            "name": user.display_name
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 404
 
 if __name__ == "__main__":
-    print("Welcome!")
-    while True:
-        action = input("register or login? ").lower()
-
-        if action == 'register':
-            print("Register New User")
-            name = input("Enter your name: ")
-            # Validate Email
-            while True:
-                email = input("Enter your email (must be @gmail.com): ").strip()
-                if email.endswith("@gmail.com"):
-                    break
-                else:
-                    print("Invalid email. Please use a @gmail.com email address.")
-
-            #Validate password
-            while True:
-                password = input("Enter your password: ")
-                if len(password) < 8:
-                    print("Password must be at least 8 characters long. Please try again.")
-                elif len(password) >= 8:
-                    break
-
-            register_user(name, email, password)
-
-        elif action == 'login':
-            print("Login User")
-            email = input("Enter your email: ")
-            password = input("Enter your password: ")
-
-            login_user(email, password)
-
-        else:
-            print("type register or login only")
+    app.run(debug=True)
